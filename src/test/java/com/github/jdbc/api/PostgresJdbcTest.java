@@ -4,6 +4,7 @@ import com.github.jdbc.api.statement.PreparedStatement;
 import com.github.jdbc.api.statement.PreparedStatementHandler;
 import com.github.jdbc.api.statement.SQL;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 
@@ -31,10 +32,12 @@ final class PostgresJdbcTest {
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """;
 
+    @Inject
+    Postgres postgres;
+
     @BeforeEach
     void beforeEach() {
-        // TODO: Execute the SQL statement.
-        new SQL("""
+        this.postgres.execute(new SQL("""
                 CREATE TABLE book (
                     id SMALLSERIAL UNIQUE NOT NULL,
                     uuid UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
@@ -46,13 +49,12 @@ final class PostgresJdbcTest {
                     in_stock BOOLEAN NOT NULL,
                     created_at TIMESTAMP NOT NULL,
                     PRIMARY KEY (id)
-                )""");
+                )"""));
     }
 
     @AfterEach
     void afterEach() {
-        // TODO: Execute the SQL statement.
-        new SQL("DROP TABLE book");
+        this.postgres.execute(new SQL("DROP TABLE book"));
     }
 
     private record BookStatement(Book book) implements PreparedStatementHandler {
