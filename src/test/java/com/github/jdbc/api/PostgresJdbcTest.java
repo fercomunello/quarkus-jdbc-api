@@ -5,12 +5,13 @@ import com.github.jdbc.api.statement.PreparedStatementHandler;
 import com.github.jdbc.api.statement.SQL;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.*;
 
 import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
 final class PostgresJdbcTest {
@@ -55,6 +56,17 @@ final class PostgresJdbcTest {
     @AfterEach
     void afterEach() {
         this.postgres.execute(new SQL("DROP TABLE book"));
+    }
+    
+    @Test
+    @DisplayName("Should insert a row returning the generated key")
+    void testRowInsertReturningKey() {
+        this.postgres.withTransaction(() -> {
+            UUID uuid = this.postgres.insertReturningUuid(
+                    new SQL(INSERT_BOOK_SQL, new BookStatement(BOOK))
+            );
+            assertNotNull(uuid);
+        });
     }
 
     private record BookStatement(Book book) implements PreparedStatementHandler {
