@@ -1,7 +1,11 @@
 package com.github.jdbc.api;
 
 import com.github.jdbc.api.exception.handler.PostgresExceptionHandler;
+import com.github.jdbc.api.exception.handler.PostgresWriteExceptionHandler;
+import com.github.jdbc.api.mapper.RowMapper;
+import com.github.jdbc.api.row.RowSet;
 import com.github.jdbc.api.statement.PreparedStatementWrapper;
+import com.github.jdbc.api.statement.Query;
 import com.github.jdbc.api.statement.SQL;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -12,7 +16,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.UUID;
+import java.util.*;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -31,25 +35,86 @@ public final class Postgres {
         this.execute(sql, false, this::handleDatabaseException);
     }
 
-    private int execute(final SQL sql, final boolean retrieveUpdateCount,
-                        final Consumer<SQLException> exceptionConsumer) {
+    @Transactional(value = TxType.MANDATORY)
+    public UUID insertReturningUuid(final SQL sql) {
+        try {
+            return this.executeInsertReturningUuid(sql);
+        } catch (SQLException exception) {
+            this.handleDatabaseWriteException(exception);
+        }
+        throw new RuntimeException("Cannot insert row in the database.");
+    }
+
+    @Transactional(value = TxType.MANDATORY)
+    public int update(final SQL sql) {
+        return this.execute(sql, true, this::handleDatabaseWriteException);
+    }
+
+    @Transactional(value = TxType.MANDATORY)
+    public <T> Optional<T> updateReturning(final SQL sql, final RowMapper<T> rowMapper) {
         try (Connection connection = this.pool.getConnection()) {
             try (PreparedStatementWrapper statementWrapper = new PreparedStatementWrapper(connection, sql)) {
-                final PreparedStatement preparedStatement = statementWrapper.getDelegate();
-                preparedStatement.execute();
-                if (retrieveUpdateCount) {
-                    return preparedStatement.getUpdateCount();
+                try (RowSet row = new RowSet(statementWrapper.getDelegate().executeQuery())) {
+                    if (row.next()) {
+                        final T result = rowMapper.mapRow(row);
+                        return Optional.ofNullable(result);
+                    }
+                    return Optional.empty();
                 }
             }
         } catch (SQLException exception) {
-            exceptionConsumer.accept(exception);
+            this.handleDatabaseWriteException(exception);
         }
-        return 0;
+        throw new RuntimeException("Cannot execute the update statement.");
     }
 
-    private void handleDatabaseException(final SQLException exception) {
-        final var exceptionHandler = new PostgresExceptionHandler(exception);
-        exceptionHandler.handle();
+    @Transactional(value = TxType.SUPPORTS)
+    public <T> Optional<T> selectFirst(final SQL sql, final RowMapper<T> rowMapper) {
+        final var query = new Query(sql, 1, 0);
+        try (Connection connection = this.pool.getConnection()) {
+            try (PreparedStatementWrapper statementWrapper = new PreparedStatementWrapper(connection, query)) {
+                final PreparedStatement preparedStatement = statementWrapper.getDelegate();
+                try (RowSet row = new RowSet(preparedStatement.executeQuery())) {
+                    if (row.next()) {
+                        final T result = rowMapper.mapRow(row);
+                        return Optional.ofNullable(result);
+                    }
+                    return Optional.empty();
+                }
+            }
+        } catch (SQLException exception) {
+            this.handleDatabaseException(exception);
+        }
+        throw new RuntimeException("Cannot execute the query.");
+    }
+
+    @Transactional(value = TxType.SUPPORTS)
+    public <T> List<T> select(final SQL sql, final RowMapper<T> rowMapper) {
+        return select(sql, rowMapper, 0, 0);
+    }
+
+    @Transactional(value = TxType.SUPPORTS)
+    public <T> List<T> select(final SQL sql, final RowMapper<T> rowMapper,
+                              final int limit, final long offset) {
+        List<T> tuples = Collections.emptyList();
+        try (Connection connection = this.pool.getConnection()) {
+            final var query = new Query(sql, limit, offset);
+            try (PreparedStatementWrapper statementWrapper = new PreparedStatementWrapper(connection, query)) {
+                final PreparedStatement preparedStatement = statementWrapper.getDelegate();
+                try (RowSet row = new RowSet(preparedStatement.executeQuery())) {
+                    if (row.next()) {
+                        tuples = new ArrayList<>();
+                        do {
+                            final T tuple = rowMapper.mapRow(row);
+                            tuples.add(tuple);
+                        } while (row.next());
+                    }
+                }
+            }
+        } catch (SQLException exception) {
+            this.handleDatabaseException(exception);
+        }
+        return tuples;
     }
 
     @Transactional(value = TxType.REQUIRED)
@@ -70,16 +135,6 @@ public final class Postgres {
     @Transactional(value = TxType.REQUIRES_NEW)
     public void withNewTransaction(final Runnable runnable) {
         runnable.run();
-    }
-
-    @Transactional(value = TxType.MANDATORY)
-    public UUID insertReturningUuid(final SQL sql) {
-        try {
-            return this.executeInsertReturningUuid(sql);
-        } catch (SQLException exception) {
-            this.handleDatabaseException(exception);
-        }
-        throw new RuntimeException("Cannot insert row in the database.");
     }
 
     private UUID executeInsertReturningUuid(final SQL sql) throws SQLException {
@@ -103,6 +158,32 @@ public final class Postgres {
             }
         }
         throw new RuntimeException("Cannot insert row in the database.");
+    }
+
+    private int execute(final SQL sql, final boolean retrieveUpdateCount,
+                        final Consumer<SQLException> exceptionConsumer) {
+        try (Connection connection = this.pool.getConnection()) {
+            try (PreparedStatementWrapper statementWrapper = new PreparedStatementWrapper(connection, sql)) {
+                final PreparedStatement preparedStatement = statementWrapper.getDelegate();
+                preparedStatement.execute();
+                if (retrieveUpdateCount) {
+                    return preparedStatement.getUpdateCount();
+                }
+            }
+        } catch (SQLException exception) {
+            exceptionConsumer.accept(exception);
+        }
+        return 0;
+    }
+
+    private void handleDatabaseException(final SQLException exception) {
+        final var exceptionHandler = new PostgresExceptionHandler(exception);
+        exceptionHandler.handle();
+    }
+
+    private void handleDatabaseWriteException(final SQLException exception) {
+        final var exceptionHandler = new PostgresWriteExceptionHandler(exception);
+        exceptionHandler.handle();
     }
 
 }
