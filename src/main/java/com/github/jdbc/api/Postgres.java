@@ -2,6 +2,7 @@ package com.github.jdbc.api;
 
 import com.github.jdbc.api.exception.handler.PostgresExceptionHandler;
 import com.github.jdbc.api.exception.handler.PostgresWriteExceptionHandler;
+import com.github.jdbc.api.fallback.UniqueViolationQuery;
 import com.github.jdbc.api.mapper.RowMapper;
 import com.github.jdbc.api.row.RowSet;
 import com.github.jdbc.api.statement.PreparedStatementWrapper;
@@ -10,6 +11,7 @@ import com.github.jdbc.api.statement.SQL;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
+import org.jetbrains.annotations.Nullable;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -37,10 +39,15 @@ public final class Postgres {
 
     @Transactional(value = TxType.MANDATORY)
     public UUID insertReturningUuid(final SQL sql) {
+        return this.insertReturningUuid(sql, null);
+    }
+
+    @Transactional(value = TxType.MANDATORY)
+    public UUID insertReturningUuid(final SQL sql, @Nullable final UniqueViolationQuery violationQuery) {
         try {
             return this.executeInsertReturningUuid(sql);
         } catch (SQLException exception) {
-            this.handleDatabaseWriteException(exception);
+            this.handleDatabaseWriteException(violationQuery, exception);
         }
         throw new RuntimeException("Cannot insert row in the database.");
     }
@@ -48,6 +55,12 @@ public final class Postgres {
     @Transactional(value = TxType.MANDATORY)
     public int update(final SQL sql) {
         return this.execute(sql, true, this::handleDatabaseWriteException);
+    }
+
+    @Transactional(value = TxType.MANDATORY)
+    public int update(final SQL sql, final UniqueViolationQuery violationQuery) {
+        return this.execute(sql, true, exception ->
+                this.handleDatabaseWriteException(violationQuery, exception));
     }
 
     @Transactional(value = TxType.MANDATORY)
@@ -183,6 +196,21 @@ public final class Postgres {
 
     private void handleDatabaseWriteException(final SQLException exception) {
         final var exceptionHandler = new PostgresWriteExceptionHandler(exception);
+        exceptionHandler.handle();
+    }
+
+    private void handleDatabaseWriteException(@Nullable final UniqueViolationQuery violationQuery,
+                                              final SQLException exception) {
+        final Supplier<Map<String, Object>> violations;
+        if (violationQuery != null) {
+            violations = () -> this.withNewTransaction(() ->
+                    this.selectFirst(violationQuery.get(), violationQuery.getRowMapper())
+                            .orElse(Map.of())
+            );
+        } else {
+            violations = Map::of;
+        }
+        final var exceptionHandler = new PostgresWriteExceptionHandler(exception, violations);
         exceptionHandler.handle();
     }
 

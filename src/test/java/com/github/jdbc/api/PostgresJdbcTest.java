@@ -4,6 +4,8 @@ import com.github.jdbc.api.book.Book;
 import com.github.jdbc.api.book.BookSample;
 import com.github.jdbc.api.book.consumer.BookRowMapper;
 import com.github.jdbc.api.book.consumer.BookStatement;
+import com.github.jdbc.api.exception.AlreadyExistsException;
+import com.github.jdbc.api.fallback.UniqueViolationQuery;
 import com.github.jdbc.api.row.Row;
 import com.github.jdbc.api.statement.SQL;
 import io.quarkus.test.TestTransaction;
@@ -13,6 +15,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.util.List;
 import java.util.Optional;
@@ -61,9 +64,7 @@ final class PostgresJdbcTest {
     @DisplayName("Should insert a row returning the generated key")
     void testRowInsertReturningKey() {
         final Book mangaBook = this.bookSample.mangaBook();
-        final UUID uuid = this.postgres.insertReturningUuid(
-                new SQL(INSERT_BOOK_SQL, new BookStatement(mangaBook))
-        );
+        final UUID uuid = this.insertBookReturningKey(mangaBook);
         assertNotNull(uuid);
 
         final Optional<Book> result = this.postgres.selectFirst(
@@ -152,9 +153,7 @@ final class PostgresJdbcTest {
     @DisplayName("Should update one row returning the changed data")
     public void testUpdateReturning() {
         final Book mangaBook = this.bookSample.mangaBook();
-        final UUID uuid = this.postgres.insertReturningUuid(
-                new SQL(INSERT_BOOK_SQL, new BookStatement(mangaBook))
-        );
+        final UUID uuid = this.insertBookReturningKey(mangaBook);
         assertNotNull(uuid);
 
         final var sql = new SQL("UPDATE book SET title = '<CHANGED>' WHERE uuid = ? RETURNING title", uuid);
@@ -163,6 +162,37 @@ final class PostgresJdbcTest {
         assertNotNull(result);
         assertTrue(result.isPresent());
         assertEquals("<CHANGED>", result.get());
+    }
+
+    @Test
+    @DisplayName("Should retrieve the conflicted fields when some unique constraint was violated")
+    void testInsertFallback() {
+        final Book mangaBook = this.bookSample.mangaBook();
+        final UUID uuid = this.postgres.withTransaction(() ->
+                this.insertBookReturningKey(mangaBook));
+
+        final Optional<String> bookTitle = this.postgres.selectFirst(new SQL(
+                "SELECT title FROM book WHERE uuid = ?", uuid), Row::getFirstString);
+
+        assertTrue(bookTitle.isPresent());
+
+        final Executable executable = () -> {
+            final var violationQuery = new UniqueViolationQuery(
+                    new SQL("SELECT title FROM book WHERE title = ?",
+                            statement -> statement.setString(bookTitle.get())), Row::map);
+
+            this.postgres.withTransaction(() -> {
+                final var sql = new SQL(INSERT_BOOK_SQL, new BookStatement(mangaBook));
+                this.postgres.update(sql, violationQuery);
+            });
+        };
+
+        final var exception = assertThrows(AlreadyExistsException.class, executable);
+        assertNotNull(exception.getViolations());
+
+        assertEquals(1, exception.getViolations().size());
+        assertNotNull(exception.getViolations().get("title"));
+        assertEquals(bookTitle.get(), exception.getViolations().get("title"));
     }
 
     private boolean insertBooks(final int n) {
@@ -179,6 +209,11 @@ final class PostgresJdbcTest {
     private boolean insertBook(final Book book) {
         final int affectedRows = this.postgres.update(new SQL(INSERT_BOOK_SQL, new BookStatement(book)));
         return affectedRows > 0;
+    }
+
+    private UUID insertBookReturningKey(final Book book) {
+        final var sql = new SQL(INSERT_BOOK_SQL, new BookStatement(book));
+        return this.postgres.insertReturningUuid(sql);
     }
 
 }
